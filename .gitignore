@@ -1,0 +1,76 @@
+# 项目目录排除 (根据用户要求)
+SaLoRA/
+text-to-lora/
+text2salora/archive/
+
+# Markdown文档 (根据用户要求忽略)
+*.md
+
+# 模型输出结果
+*.log
+*.txt
+results/
+output/
+trained_probes/
+saved_subspaces/
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.ckpt
+checkpoint-*/
+
+# Archive目录 (根据用户要求忽略)
+archive/
+Archive/
+ARCHIVE/
+
+# Markdown目录 (根据用户要求忽略)  
+markdown/
+Markdown/
+MARKDOWN/
+
+# Python缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+
+# 虚拟环境
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# 数据文件
+*.npz
+*.npy
+*.json
+*.jsonl
+*.csv
+
+# 临时文件
+tmp/
+temp/
+.cache/
+*.tmp
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# Git相关
+*.orig

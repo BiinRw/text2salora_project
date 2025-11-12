@@ -1,0 +1,66 @@
+# 默认配置文件
+
+# 模型路径
+model:
+  base_model_path: '/var/models/huggingface/hub/models--Qwen--Qwen2.5-1.5B-Instruct/snapshots/f347a08eb880e0a3c87089c8c45043775c338c9c'
+  device: 'cuda:0'
+
+# 偏好子空间
+subspace:
+  subspace_dir: '../preference_subspace/saved_subspaces'
+  dimensions: ['safety', 'helpfulness', 'correctness', 'coherence']
+  use_fused: true
+  layer_ids: null  # null=使用融合子空间, 或指定层 [15, 16, 17]
+
+# 正交约束
+constraint:
+  lambda_orth: 0.1  # 正交损失系数
+  dimension_weights:  # 各偏好维度权重
+    safety: 1.0
+    helpfulness: 1.0
+    correctness: 0.8
+    coherence: 0.8
+
+# LoRA 配置
+lora:
+  rank: 8
+  alpha: 16
+  dropout: 0.1
+  target_modules: ['q_proj', 'v_proj', 'k_proj', 'o_proj']
+
+# 训练参数
+training:
+  output_dir: './output/lora_orthogonal'
+  num_train_epochs: 3
+  per_device_train_batch_size: 4
+  gradient_accumulation_steps: 4
+  learning_rate: 5e-5
+  warmup_steps: 100
+  logging_steps: 10
+  save_steps: 500
+  eval_steps: 500
+  evaluation_strategy: 'steps'
+  save_total_limit: 3
+  fp16: true
+  max_grad_norm: 1.0
+
+# 数据
+data:
+  train_file: null  # 指定训练数据路径
+  eval_file: null
+  max_length: 512
+  
+# 评估
+eval:
+  probe_dirs:
+    safety: '../probing/results/safety_probe'
+    helpfulness: '../probing/results/helpfulness_probe'
+    correctness: '../probing/results/correctness_probe'
+    coherence: '../probing/results/coherence_probe'
+  test_data:
+    safety: '../probing/data/safety_paired/test.json'
+    helpfulness: '../probing/data/helpsteer_paired/test.json'
+    correctness: '../probing/data/helpsteer_paired/test.json'
+    coherence: '../probing/data/helpsteer_paired/test.json'
+  layer_id: 15
+  max_test_samples: 200
