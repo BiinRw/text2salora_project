@@ -1,0 +1,80 @@
+# LoRA △W 消融实验配置文件
+
+# ============================================================
+# 模型配置
+# ============================================================
+model:
+  base_model_path: "Qwen/Qwen2.5-1.5B-Instruct"
+  lora_path: "../text2salora/protected_lora/output/safety-lora-xxx"
+  subspace_dir: "../text2salora/protected_lora/output/xxx-subspace"
+  dimension: "safety"
+  device: "cuda:0"
+  num_layers: 28
+
+# ============================================================
+# 消融配置
+# ============================================================
+ablation:
+  # 基础配置
+  baseline:
+    disabled_layers: []  # 全量LoRA baseline
+  
+  # 单层消融
+  single_layers:
+    - name: "disable_layer_16"
+      disabled_layers: [16]
+    
+    - name: "disable_layer_15"
+      disabled_layers: [15]
+    
+    - name: "disable_layer_17"
+      disabled_layers: [17]
+  
+  # 层范围消融
+  layer_ranges:
+    - name: "disable_early_layers_0_8"
+      disabled_layers: [0, 1, 2, 3, 4, 5, 6, 7, 8]
+    
+    - name: "disable_mid_layers_8_16"
+      disabled_layers: [8, 9, 10, 11, 12, 13, 14, 15, 16]
+    
+    - name: "disable_late_layers_17_27"
+      disabled_layers: [17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27]
+  
+  # 补集消融 (只保留某层)
+  complement:
+    - name: "only_layer_16"
+      disabled_layers: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27]
+
+# ============================================================
+# 测试配置
+# ============================================================
+test:
+  # 有害率测试
+  harmfulness:
+    test_data_path: "../../data/safety/test_set.json"
+    num_samples: 100
+    batch_size: 16
+  
+  # 探针准确度测试
+  probe:
+    probe_dir: "../../probing_test/probes"
+    position: "assistant_last"
+    num_probes: 336
+
+# ============================================================
+# 输出配置
+# ============================================================
+output:
+  result_dir: "./results/ablation_test"
+  save_results_json: true
+  save_analysis_plot: true
+  plot_formats: ["png", "pdf"]
+
+# ============================================================
+# 日志配置
+# ============================================================
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
