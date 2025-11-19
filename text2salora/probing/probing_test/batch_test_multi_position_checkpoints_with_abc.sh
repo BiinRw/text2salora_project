@@ -32,6 +32,7 @@ SUBSPACE_DIR="../../preference_subspace/saved_subspaces"
 START_STEP=""
 END_STEP=""
 STEP_INTERVAL=""
+CONSTRAINED_LAYERS=""  # 格式: "start,end" 如 "0,8"
 
 # 解析命令行参数
 while [[ $# -gt 0 ]]; do
@@ -82,6 +83,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --step_interval)
             STEP_INTERVAL="$2"
+            shift 2
+            ;;
+        --constrained_layers)
+            CONSTRAINED_LAYERS="$2"
             shift 2
             ;;
         --subspace_dir)
@@ -250,6 +255,15 @@ if [ -n "$MAX_SAMPLES" ]; then
 else
     echo -e "${BLUE}📦 测试样本:${NC} 全部" | tee -a "$LOG_FILE"
 fi
+
+    # 添加层约束参数
+    if [ -n "$CONSTRAINED_LAYERS" ]; then
+        CMD="$CMD --constrained_layers $CONSTRAINED_LAYERS"
+    fi
+    
+    if [ -n "$CONSTRAINED_LAYERS" ]; then
+        CMD="$CMD --constrained_layers $CONSTRAINED_LAYERS"
+    fi
 echo -e "${BLUE}💻 设备:${NC} $DEVICE" | tee -a "$LOG_FILE"
 echo -e "${BLUE}💾 结果目录:${NC} $RUN_DIR" | tee -a "$LOG_FILE"
 echo -e "${CYAN}================================================================================${NC}" | tee -a "$LOG_FILE"
@@ -333,6 +347,11 @@ for i in "${!FILTERED_CHECKPOINTS[@]}"; do
     
     if [ -n "$MAX_SAMPLES" ]; then
         CMD="$CMD --max_samples $MAX_SAMPLES"
+    fi
+
+    # 添加层约束参数
+    if [ -n "$CONSTRAINED_LAYERS" ]; then
+        CMD="$CMD --constrained_layers $CONSTRAINED_LAYERS"
     fi
     
     # 执行测试

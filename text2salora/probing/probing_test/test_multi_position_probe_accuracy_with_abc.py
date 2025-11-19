@@ -32,11 +32,12 @@ from typing import Dict, List, Tuple
 class ABCConstraintLoader:
     """Load and apply ABC constraints (C = I - V @ V^T)"""
     
-    def __init__(self, subspace_dir, dimension, device='cuda:0'):
+    def __init__(self, subspace_dir, dimension, device='cuda:0', constrained_layers=None):
         self.subspace_dir = Path(subspace_dir)
         self.dimension = dimension
         self.device = device
         self.subspaces = {}
+        self.constrained_layers = constrained_layers  # None表示所有层, 或者(start, end)元组
         
     def load_subspaces(self):
         """Load subspace V matrices for all layers from per-layer files"""
@@ -143,6 +144,13 @@ class ABCConstraintLoader:
         Returns:
             C: Constraint matrix of shape (hidden_dim, hidden_dim)
         """
+        # 检查该层是否需要应用约束
+        if self.constrained_layers is not None:
+            start, end = self.constrained_layers
+            if not (start <= layer_id <= end):
+                # 该层不在约束范围内,返回单位矩阵(无约束)
+                return torch.eye(hidden_dim, device=self.device)
+        
         if layer_id not in self.subspaces:
             return torch.eye(hidden_dim, device=self.device)
         
@@ -385,7 +393,7 @@ class MultiPositionActivationExtractor:
         return result
 
 
-def load_model_with_abc(model_path, lora_path, subspace_dir, dimension, device='cuda:0'):
+def load_model_with_abc(model_path, lora_path, subspace_dir, dimension, device='cuda:0', constrained_layers=None):
     """Load model and apply ABC constraints"""
     print(f"\n Loading model with ABC constraints...")
     print(f"   Base model: {model_path}")
@@ -404,8 +412,14 @@ def load_model_with_abc(model_path, lora_path, subspace_dir, dimension, device='
     )
     
     # Load ABC constraints
-    abc_loader = ABCConstraintLoader(subspace_dir, dimension, device)
+    abc_loader = ABCConstraintLoader(subspace_dir, dimension, device, constrained_layers)
     has_constraints = abc_loader.load_subspaces()
+    
+    # 打印层约束信息
+    if constrained_layers is not None:
+        print(f"   🎯 Constrained layers: {constrained_layers[0]}-{constrained_layers[1]}")
+    else:
+        print(f"   🎯 Constrained layers: All layers (0-27)")
     
     # Manually load LoRA and apply ABC
     print(f"\n Loading LoRA weights and applying ABC constraints...")
@@ -694,6 +708,8 @@ def main():
     parser.add_argument('--subspace_dir', type=str,
                        default='preference_subspace/saved_subspaces',
                        help='Subspace directory')
+    parser.add_argument('--constrained_layers', type=str, default=None,
+                       help='约束层范围,格式: "start,end" (如 "0,8" 或 "16,16"), None表示所有层')
     parser.add_argument('--device', type=str, default='cuda:0',
                        help='计算设备')
     
@@ -731,12 +747,22 @@ def main():
     print("="*80)
     
     # 1. 加载模型
+    # 解析层约束参数
+    constrained_layers = None
+    if args.constrained_layers:
+        start, end = map(int, args.constrained_layers.split(','))
+        constrained_layers = (start, end)
+        print(f"🎯 将约束应用于层: {start}-{end}")
+    else:
+        print(f"🎯 将约束应用于所有层")
+    
     model, tokenizer, model_type = load_model_with_abc(
         args.model_path,
         args.lora_path,
         args.subspace_dir,
         args.dimension,
-        args.device
+        args.device,
+        constrained_layers
     )
     
     # 2. 加载测试数据

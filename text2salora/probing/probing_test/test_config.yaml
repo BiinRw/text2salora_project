@@ -1,0 +1,107 @@
+# 探针测试配置文件
+# 在此文件中设置常用的测试参数
+
+# ===== 模型配置 =====
+models:
+  # 基模型配置
+  base:
+    model_path: "meta-llama/Meta-Llama-3.1-8B-Instruct"
+    description: "基础Llama 3.1 8B模型"
+  
+  # 微调模型配置(示例)
+  finetuned:
+    model_path: "/path/to/your/finetuned/model"
+    description: "微调后的模型"
+  
+  # LoRA模型配置(示例)
+  lora:
+    model_path: "meta-llama/Meta-Llama-3.1-8B-Instruct"
+    lora_path: "/path/to/your/lora/adapter"
+    description: "加载LoRA适配器的模型"
+
+# ===== 测试维度 =====
+dimensions:
+  # 可用维度列表
+  available:
+    - helpfulness    # 帮助性
+    - correctness    # 正确性
+    - coherence      # 连贯性
+    - verbosity      # 冗余度
+    - safety         # 安全性
+  
+  # 默认测试维度
+  default:
+    - helpfulness
+    - correctness
+
+# ===== 数据配置 =====
+data:
+  # 数据类型: paired (配对数据) 或 ultra (极端数据)
+  type: "paired"
+  
+  # 配对数据路径
+  paired:
+    data_dir: "../data/helpsteer_merged_paired"
+    probe_dir: "../trained_probes_paired"
+  
+  # 极端数据路径
+  ultra:
+    data_dir: "../data/helpsteer_ultra_extreme"
+    probe_dir: "../trained_probes_extreme"
+
+# ===== 测试配置 =====
+testing:
+  # 计算设备
+  device: "cuda:0"
+  
+  # 最大测试样本数 (null 表示使用全部数据)
+  max_samples: null
+  
+  # 快速测试样本数 (用于调试)
+  quick_test_samples: 100
+
+# ===== 输出配置 =====
+output:
+  # 结果输出根目录
+  base_dir: "results"
+  
+  # 是否保存详细JSON结果
+  save_detailed: true
+  
+  # 是否保存简洁文本结果
+  save_summary: true
+
+# ===== 批量测试配置 =====
+batch_testing:
+  # 批量测试时使用的维度列表 (null 表示自动检测)
+  dimensions: null
+  
+  # 批量测试时是否显示详细进度
+  verbose: true
+
+# ===== 高级配置 =====
+advanced:
+  # 是否使用FP16精度
+  fp16: true
+  
+  # 批处理大小 (用于激活值提取)
+  batch_size: 1
+  
+  # 最大序列长度
+  max_length: 512
+
+# ===== 比较测试配置 =====
+# 用于比较基模型和LoRA模型的准确度
+comparison:
+  # 是否启用比较模式
+  enabled: false
+  
+  # 要比较的模型列表
+  models_to_compare:
+    - base
+    - lora
+  
+  # 要比较的维度
+  dimensions_to_compare:
+    - helpfulness
+    - correctness
