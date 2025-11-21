@@ -220,74 +220,68 @@ def load_subspace_constraint(
     subspace_dir: str,
     dimensions: List[str],
     device: str = 'cuda:0',
-    subspace_rank: int = None  # 新增: 使用子空间的前 k 个向量，None=使用全部
+    subspace_rank: int = None
 ) -> OrthogonalConstraint:
-    """加载子空间约束。支持 .pt 和 .npy 文件格式。
-    优先加载 fused 子空间文件（如 safety_fused_subspace.pt）。
+    """加载子空间约束 - 支持投影特定子空间
     
-    Args:
-        subspace_dir: 子空间文件目录
-        dimensions: 偏好维度列表
-        device: 设备
-        subspace_rank: 使用子空间的前 k 个向量（None=使用全部）
+    注意:
+    1. 加载投影特定的fused文件用于OrthogonalConstraint(训练中计算正交损失)
+    2. 添加元数据属性(.subspace_dir, .dimension)供lora_svd_init.py使用
+    3. lora_svd_init.py会按投影类型加载具体的layer-specific文件
     """
     from pathlib import Path
+    import torch
     
-    print(f"\n📊 加载偏好子空间: {dimensions}")
+    print(f"\n📊 加载偏好子空间约束 (投影特定模式)")
     print(f"   子空间目录: {subspace_dir}")
+    print(f"   维度: {dimensions}")
     
-    # 加载子空间矩阵
+    # 加载子空间矩阵 (用于OrthogonalConstraint计算正交损失)
     subspace_V = {}
     
     for dim in dimensions:
-        # 尝试多种文件格式
-        candidates = [
-            Path(subspace_dir) / f"{dim}_fused_subspace.pt",  # PyTorch 格式（优先）
+        # 🔑 新格式:尝试加载投影特定的fused文件
+        # 优先顺序:q_proj -> k_proj -> v_proj -> o_proj -> up_proj -> down_proj
+        projections_priority = ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'up_proj', 'down_proj']
+        
+        candidates = []
+        for proj in projections_priority:
+            candidates.append(Path(subspace_dir) / f"{dim}_{proj}_fused_subspace.pt")
+        
+        # 兼容旧格式(如果新格式不存在)
+        candidates.extend([
+            Path(subspace_dir) / f"{dim}_fused_subspace.pt",
             Path(subspace_dir) / f"{dim}.pt",
             Path(subspace_dir) / f"{dim}_subspace.pt",
-            Path(subspace_dir) / f"{dim}.npy",  # NumPy 格式
-            Path(subspace_dir) / f"{dim}_V.npy",
-            Path(subspace_dir) / f"{dim}_subspace.npy",
-        ]
+        ])
         
         loaded = False
         for p in candidates:
             if p.exists():
                 print(f"   找到文件: {p.name}")
                 try:
-                    if p.suffix == '.pt':
-                        # 加载 PyTorch 文件
-                        V_tensor = torch.load(p, map_location=device)
-                        if isinstance(V_tensor, dict):
-                            # 如果是字典，尝试提取子空间矩阵
-                            if 'subspace' in V_tensor:
-                                V_tensor = V_tensor['subspace']
-                            elif 'V' in V_tensor:
-                                V_tensor = V_tensor['V']
-                            else:
-                                # 使用第一个值
-                                V_tensor = list(V_tensor.values())[0]
-                        V_tensor = V_tensor.to(device)
-                    elif p.suffix == '.npy':
-                        # 加载 NumPy 文件
-                        arr = np.load(p)
-                        if arr.ndim == 1:
-                            arr = arr[:, None]
-                        V_tensor = torch.from_numpy(arr).to(device)
+                    data = torch.load(p, map_location=device)
+                    if isinstance(data, dict):
+                        if 'V' in data:
+                            V_tensor = data['V']
+                        elif 'subspace' in data:
+                            V_tensor = data['subspace']
+                        else:
+                            V_tensor = list(data.values())[0]
                     else:
-                        continue
+                        V_tensor = data
                     
-                    # 确保是 2D 张量
+                    # 确保是2D张量
                     if V_tensor.ndim == 1:
                         V_tensor = V_tensor.unsqueeze(1)
                     
-                    # 截断子空间（如果指定了 subspace_rank）
+                    # 截断子空间(如果指定)
                     if subspace_rank is not None and V_tensor.shape[1] > subspace_rank:
                         original_rank = V_tensor.shape[1]
                         V_tensor = V_tensor[:, :subspace_rank]
                         print(f"   📊 截断子空间: {original_rank} → {subspace_rank}")
                     
-                    subspace_V[dim] = V_tensor
+                    subspace_V[dim] = V_tensor.to(device)
                     print(f"   ✅ {dim}: shape={V_tensor.shape}")
                     loaded = True
                     break
@@ -299,15 +293,15 @@ def load_subspace_constraint(
         if not loaded:
             raise FileNotFoundError(
                 f"无法找到子空间文件 for dimension '{dim}' in {subspace_dir}.\n"
-                f"尝试的文件: {[str(c) for c in candidates]}"
+                f"尝试的文件: {[str(c.name) for c in candidates if c.exists() == False][:5]}...\n"
+                f"提示: 确保已运行 run_extract_subspace.sh 生成投影特定的子空间文件"
             )
     
-    # 创建正交约束
     # 创建 PreferenceSubspaceManager
     from utils.svd_utils import PreferenceSubspaceManager
     manager = PreferenceSubspaceManager(subspace_dir=subspace_dir, device=device)
     
-    # 将加载的子空间矩阵放入 manager
+    # 将加载的子空间矩阵放入 manager (用于OrthogonalConstraint)
     for dim in dimensions:
         manager.subspaces[dim] = {'fused': subspace_V[dim]}
     
@@ -318,7 +312,15 @@ def load_subspace_constraint(
         device=device
     )
     
-    print(f"✅ 子空间加载完成")
+    # 🔑 添加元数据属性供 lora_svd_init.py 使用
+    constraint.subspace_dir = Path(subspace_dir)
+    constraint.dimension = dimensions[0] if dimensions else None
+    constraint.subspace_rank = subspace_rank
+    
+    print(f"✅ 子空间约束加载完成")
+    print(f"   📁 元数据 - 子空间目录: {constraint.subspace_dir}")
+    print(f"   🎯 元数据 - 主维度: {constraint.dimension}")
+    
     return constraint
 
 def train(
@@ -636,7 +638,7 @@ def train(
         logging_steps=10,
         save_steps=500,
         eval_strategy='steps' if eval_dataset else 'no',
-        eval_steps=100 if eval_dataset else None,
+        eval_steps=500 if eval_dataset else None,
         save_total_limit=20,
         fp16=True,
         gradient_checkpointing=use_gradient_checkpointing,  # ✅ 可配置

@@ -25,8 +25,8 @@ python train_v2_main.py \
     --dataset_type ultrafeedback \
     --dataset_size full \
     --data_format instruction \
-    --output_dir ./output/helpfulness-lora_wo_g_r16_a32-ep1-svd_rank16-salora_all-lr_5e-5 \
-    --gpu_id 0 \
+    --output_dir ./output/correctness-lora_wo_g_r16_a32-ep1-svd_rank16-salora_all-lr_5e-5 \
+    --gpu_id 3 \
     \
     --lora_rank 16 \
     --lora_alpha 32 \
@@ -43,13 +43,13 @@ python train_v2_main.py \
     --max_length 512 \
     --use_gradient_checkpointing \
     \
-    --subspace_dir ../preference_subspace/saved_subspaces \
-    --preference_dimensions helpfulness \
+    --subspace_dir ../preference_subspace/Qwen2.5-1.5B-Instruct \
+    --preference_dimensions correctness \
     --constrained_layers "$CONSTRAINED_LAYERS" \
     \
     --use_swanlab true \
     --swanlab_project protected-lora \
-    --experiment_name "helpfulness-lora_wo_g_r16_a32-ep1-svd_rank16-salora_all-lr_5e-5" \
+    --experiment_name "correctness-lora_wo_g_r16_a32-ep1-svd_rank16-salora_all-lr_5e-5" \
     --print_interval 10
 
 echo "✅ 训练完成"
