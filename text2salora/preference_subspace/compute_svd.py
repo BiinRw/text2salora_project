@@ -1,6 +1,7 @@
 """
-偏好子空间 SVD 分解
+偏好子空间 SVD 分解 (支持投影层特定文件)
 对特征差分执行奇异值分解,提取偏好子空间基向量
+v2: 支持读取 {dimension}_{projection}_feature_diff.npz 格式文件
 """
 
 import os
@@ -25,7 +26,14 @@ def load_feature_diff(feature_file: str) -> Dict[int, np.ndarray]:
     data = np.load(feature_file)
     
     layer_diffs = {}
-    num_layers = int(data['num_layers'])
+    
+    # 检查是否有num_layers字段
+    if 'num_layers' in data:
+        num_layers = int(data['num_layers'])
+    else:
+        # 旧版本文件,尝试查找所有layer_*键
+        layer_keys = [k for k in data.keys() if k.startswith('layer_')]
+        num_layers = len(layer_keys)
     
     for layer_id in range(num_layers):
         key = f'layer_{layer_id}'
@@ -33,8 +41,10 @@ def load_feature_diff(feature_file: str) -> Dict[int, np.ndarray]:
             layer_diffs[layer_id] = data[key]
     
     print(f"   ✅ 加载 {len(layer_diffs)} 层的特征差分")
-    print(f"   样本数: {data['num_samples']}")
-    print(f"   隐藏层维度: {data['hidden_size']}")
+    if 'num_samples' in data:
+        print(f"   样本数: {data['num_samples']}")
+    if 'hidden_size' in data:
+        print(f"   输出维度: {data['hidden_size']}")
     
     return layer_diffs
 
@@ -112,7 +122,8 @@ def compute_multi_layer_svd(
         ev_ratio = subspace['explained_variance_ratio']
         print(f"      Top 10 奇异值解释方差: {ev_ratio[9].item():.4f}")
         print(f"      Top 32 奇异值解释方差: {ev_ratio[31].item():.4f}")
-        print(f"      Top 64 奇异值解释方差: {ev_ratio[-1].item():.4f}")
+        if len(ev_ratio) >= 64:
+            print(f"      Top 64 奇异值解释方差: {ev_ratio[-1].item():.4f}")
     
     return layer_subspaces
 
@@ -143,31 +154,41 @@ def fuse_multi_layer_subspace(
             'num_layers': len(layer_subspaces)
         }
     
-    elif method in ['avg', 'weighted_avg']:
-        # 加权平均多层的 V 矩阵
+    elif method == 'weighted_avg':
+        # 加权平均
         if weights is None:
-            # 均等权重
-            weights = {layer_id: 1.0 / len(layer_subspaces) 
-                      for layer_id in layer_subspaces.keys()}
-        else:
-            # 归一化权重
-            total_weight = sum(weights.values())
-            weights = {k: v / total_weight for k, v in weights.items()}
+            # 使用奇异值作为权重
+            weights = {
+                layer_id: subspace['S'][0].item()
+                for layer_id, subspace in layer_subspaces.items()
+            }
         
+        # 归一化权重
+        total_weight = sum(weights.values())
+        weights = {k: v/total_weight for k, v in weights.items()}
+        
+        # 加权平均 V 矩阵
         V_fused = None
         for layer_id, subspace in layer_subspaces.items():
-            V = subspace['V']
-            w = weights.get(layer_id, 0.0)
-            
             if V_fused is None:
-                V_fused = w * V
+                V_fused = weights[layer_id] * subspace['V']
             else:
-                V_fused += w * V
+                V_fused += weights[layer_id] * subspace['V']
         
         return {
             'V': V_fused,
-            'method': method,
-            'weights': weights,
+            'method': 'weighted_avg',
+            'weights': weights
+        }
+    
+    elif method == 'avg':
+        # 简单平均
+        V_list = [subspace['V'] for subspace in layer_subspaces.values()]
+        V_fused = torch.stack(V_list).mean(dim=0)
+        
+        return {
+            'V': V_fused,
+            'method': 'avg',
             'num_layers': len(layer_subspaces)
         }
     
@@ -178,156 +199,145 @@ def fuse_multi_layer_subspace(
 def save_subspaces(
     layer_subspaces: Dict[int, Dict],
     dimension: str,
+    projection_type: str,  # 新增: 投影层类型
     output_dir: str,
     fused_subspace: Optional[Dict] = None
 ):
-    """保存子空间
+    """保存子空间到文件
     
     Args:
         layer_subspaces: {layer_id: subspace_dict}
-        dimension: 偏好维度
+        dimension: 偏好维度名称
+        projection_type: 投影层类型
         output_dir: 输出目录
-        fused_subspace: 融合的子空间 (可选)
+        fused_subspace: 融合后的子空间 (可选)
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # 1. 保存各层子空间
+    # 保存各层子空间 (文件名包含projection)
     for layer_id, subspace in layer_subspaces.items():
-        filename = output_dir / f'{dimension}_layer{layer_id}_subspace.pt'
+        filename = output_dir / f'{dimension}_{projection_type}_layer{layer_id}_subspace.pt'
         torch.save({
             'V': subspace['V'],
             'S': subspace['S'],
             'U': subspace['U'],
             'explained_variance_ratio': subspace['explained_variance_ratio'],
             'layer_id': layer_id,
-            'dimension': dimension
+            'dimension': dimension,
+            'projection': projection_type  # 新增: 保存投影类型信息
         }, filename)
-        print(f"   ✅ Layer {layer_id}: {filename}")
+        print(f"   ✅ 保存: {filename.name}")
     
-    # 2. 保存融合子空间
+    # 保存融合子空间
     if fused_subspace is not None:
-        filename = output_dir / f'{dimension}_fused_subspace.pt'
+        filename = output_dir / f'{dimension}_{projection_type}_fused_subspace.pt'
         torch.save({
             'V': fused_subspace['V'],
             'method': fused_subspace['method'],
             'dimension': dimension,
-            **{k: v for k, v in fused_subspace.items() 
-               if k not in ['V', 'method', 'dimension']}
+            'projection': projection_type,  # 新增
+            **{k: v for k, v in fused_subspace.items() if k not in ['V', 'method']}
         }, filename)
-        print(f"   ✅ Fused: {filename}")
+        print(f"   ✅ 保存融合子空间: {filename.name}")
     
-    # 3. 保存元信息
+    # 保存元信息
+    meta_file = output_dir / f'{dimension}_{projection_type}_meta.json'
     meta_info = {
         'dimension': dimension,
+        'projection': projection_type,  # 新增
         'num_layers': len(layer_subspaces),
-        'layer_ids': list(layer_subspaces.keys()),
-        'top_k': layer_subspaces[list(layer_subspaces.keys())[0]]['V'].shape[1],
-        'hidden_size': layer_subspaces[list(layer_subspaces.keys())[0]]['V'].shape[0]
+        'layer_ids': sorted(layer_subspaces.keys()),
+        'subspace_rank': layer_subspaces[list(layer_subspaces.keys())[0]]['V'].shape[1],
+        'fused': fused_subspace is not None,
+        'fuse_method': fused_subspace['method'] if fused_subspace else None
     }
-    
-    if fused_subspace is not None:
-        meta_info['fused_method'] = fused_subspace['method']
-        meta_info['fused_shape'] = list(fused_subspace['V'].shape)
-    
-    meta_file = output_dir / f'{dimension}_meta.json'
     with open(meta_file, 'w') as f:
         json.dump(meta_info, f, indent=2)
-    print(f"   ✅ Meta: {meta_file}")
+    print(f"   ✅ 保存元信息: {meta_file.name}")
 
 
 def plot_singular_values(
     layer_subspaces: Dict[int, Dict],
     dimension: str,
+    projection_type: str,  # 新增
     output_dir: str
 ):
-    """可视化奇异值分布
-    
-    Args:
-        layer_subspaces: {layer_id: subspace_dict}
-        dimension: 偏好维度
-        output_dir: 输出目录
-    """
+    """绘制奇异值分布"""
     output_dir = Path(output_dir)
     
-    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-    fig.suptitle(f'{dimension.capitalize()} Dimension - Singular Values Analysis', 
-                 fontsize=16)
+    fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+    axes = axes.flatten()
     
-    # 1. 奇异值大小
-    ax = axes[0, 0]
-    for layer_id, subspace in sorted(layer_subspaces.items()):
+    # 1. 所有层的奇异值
+    ax = axes[0]
+    for layer_id, subspace in layer_subspaces.items():
         S = subspace['S'].numpy()
-        ax.plot(S, label=f'Layer {layer_id}', alpha=0.7)
+        ax.plot(S, alpha=0.5, label=f'Layer {layer_id}')
     ax.set_xlabel('Rank')
     ax.set_ylabel('Singular Value')
-    ax.set_title('Singular Values by Layer')
-    ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
+    ax.set_title(f'{dimension.capitalize()} - {projection_type} - Singular Values')
+    ax.set_yscale('log')
     ax.grid(True, alpha=0.3)
+    ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
     
     # 2. 方差解释率
-    ax = axes[0, 1]
-    for layer_id, subspace in sorted(layer_subspaces.items()):
-        ev = subspace['explained_variance_ratio'].numpy()
-        ax.plot(ev, label=f'Layer {layer_id}', alpha=0.7)
+    ax = axes[1]
+    for layer_id, subspace in layer_subspaces.items():
+        ev_ratio = subspace['explained_variance_ratio'].numpy()
+        ax.plot(ev_ratio, alpha=0.5, label=f'Layer {layer_id}')
     ax.set_xlabel('Number of Components')
-    ax.set_ylabel('Cumulative Explained Variance')
-    ax.set_title('Explained Variance Ratio')
-    ax.axhline(y=0.9, color='r', linestyle='--', alpha=0.5, label='90%')
-    ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
+    ax.set_ylabel('Cumulative Explained Variance Ratio')
+    ax.set_title(f'{dimension.capitalize()} - {projection_type} - Explained Variance')
     ax.grid(True, alpha=0.3)
-    
-    # 3. Log scale 奇异值
-    ax = axes[1, 0]
-    for layer_id, subspace in sorted(layer_subspaces.items()):
-        S = subspace['S'].numpy()
-        ax.semilogy(S, label=f'Layer {layer_id}', alpha=0.7)
-    ax.set_xlabel('Rank')
-    ax.set_ylabel('Singular Value (log scale)')
-    ax.set_title('Singular Values (Log Scale)')
     ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
-    ax.grid(True, alpha=0.3)
     
-    # 4. 各层前10个奇异值对比
-    ax = axes[1, 1]
+    # 3. 层平均奇异值
+    ax = axes[2]
     layer_ids = sorted(layer_subspaces.keys())
-    top_10_values = []
-    for layer_id in layer_ids:
-        S = subspace['S'].numpy()[:10]
-        top_10_values.append(S)
-    
-    top_10_values = np.array(top_10_values)
-    x = np.arange(len(layer_ids))
-    width = 0.08
-    
-    for i in range(min(10, top_10_values.shape[1])):
-        ax.bar(x + i * width, top_10_values[:, i], width, 
-               label=f'SV {i+1}', alpha=0.7)
-    
+    mean_sv = [layer_subspaces[lid]['S'].mean().item() for lid in layer_ids]
+    ax.bar(layer_ids, mean_sv)
     ax.set_xlabel('Layer ID')
-    ax.set_ylabel('Singular Value')
-    ax.set_title('Top 10 Singular Values by Layer')
-    ax.set_xticks(x + width * 4.5)
-    ax.set_xticklabels(layer_ids)
-    ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
+    ax.set_ylabel('Mean Singular Value')
+    ax.set_title(f'{dimension.capitalize()} - {projection_type} - Mean SV per Layer')
     ax.grid(True, alpha=0.3, axis='y')
+    
+    # 4. Top-k 方差解释率热图
+    ax = axes[3]
+    k_values = [10, 32, 64]
+    ev_matrix = []
+    for lid in layer_ids:
+        ev_ratio = layer_subspaces[lid]['explained_variance_ratio'].numpy()
+        ev_at_k = [ev_ratio[k-1] if k <= len(ev_ratio) else ev_ratio[-1] for k in k_values]
+        ev_matrix.append(ev_at_k)
+    
+    im = ax.imshow(np.array(ev_matrix).T, aspect='auto', cmap='viridis')
+    ax.set_xticks(range(len(layer_ids)))
+    ax.set_xticklabels(layer_ids)
+    ax.set_yticks(range(len(k_values)))
+    ax.set_yticklabels([f'Top-{k}' for k in k_values])
+    ax.set_xlabel('Layer ID')
+    ax.set_title(f'{dimension.capitalize()} - {projection_type} - Explained Variance at Top-k')
+    plt.colorbar(im, ax=ax)
     
     plt.tight_layout()
     
-    output_file = output_dir / f'{dimension}_singular_values.png'
-    plt.savefig(output_file, dpi=300, bbox_inches='tight')
-    print(f"\n📊 奇异值可视化已保存: {output_file}")
+    output_file = output_dir / f'{dimension}_{projection_type}_singular_values.png'
+    plt.savefig(output_file, dpi=150, bbox_inches='tight')
+    print(f"   ✅ 保存可视化: {output_file.name}")
     plt.close()
 
 
 if __name__ == '__main__':
     import argparse
     
-    parser = argparse.ArgumentParser(description='计算偏好子空间 SVD')
+    parser = argparse.ArgumentParser(description='计算偏好子空间 SVD (支持投影层)')
     parser.add_argument('--feature_file', type=str, required=True,
-                        help='特征差分文件路径')
+                        help='特征差分文件路径 ({dimension}_{projection}_feature_diff.npz)')
     parser.add_argument('--dimension', type=str, required=True,
                         help='偏好维度名称')
+    parser.add_argument('--projection', type=str, required=True,
+                        help='投影层类型 (q_proj/k_proj/v_proj/o_proj/up_proj/down_proj)')
     parser.add_argument('--output_dir', type=str, required=True,
                         help='输出目录')
     parser.add_argument('--top_k', type=int, default=64,
@@ -343,7 +353,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     
     print("=" * 80)
-    print(f"🔬 计算 {args.dimension} 维度的偏好子空间")
+    print(f"🔬 计算 {args.dimension} 维度 - {args.projection} 投影的偏好子空间")
     print("=" * 80)
     
     # 1. 加载特征差分
@@ -380,15 +390,20 @@ if __name__ == '__main__':
     save_subspaces(
         layer_subspaces,
         args.dimension,
+        args.projection,  # 新增
         args.output_dir,
         fused_subspace
     )
     
     # 6. 可视化
+    print(f"\n📊 生成可视化:")
     plot_singular_values(
         layer_subspaces,
         args.dimension,
+        args.projection,  # 新增
         args.output_dir
     )
     
-    print(f"\n✅ 完成!")
+    print("\n" + "=" * 80)
+    print("✅ 完成!")
+    print("=" * 80)

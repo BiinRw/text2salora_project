@@ -1,6 +1,7 @@
 """
-偏好子空间特征提取
+偏好子空间特征提取 (支持分投影层提取)
 提取 chosen/rejected 样本的激活值,计算特征差分
+v2: 支持为每个投影层(q_proj, k_proj, v_proj, o_proj, up_proj, down_proj)分别提取子空间
 """
 
 import os
@@ -14,12 +15,20 @@ from pathlib import Path
 
 
 class ActivationExtractor:
-    """提取模型激活值的工具类 (复用 probing 实现)"""
+    """提取模型激活值的工具类 (支持指定投影层)"""
     
-    def __init__(self, model, tokenizer, device='cuda:0'):
+    def __init__(self, model, tokenizer, projection_type='q_proj', device='cuda:0'):
+        """
+        Args:
+            model: 预训练模型
+            tokenizer: 分词器
+            projection_type: 要提取的投影层类型 (q_proj/k_proj/v_proj/o_proj/up_proj/down_proj)
+            device: 设备
+        """
         self.model = model
         self.tokenizer = tokenizer
         self.device = device
+        self.projection_type = projection_type  # 新增: 投影层类型
         
         # 自动检测模型层的正确路径
         self.model_layers = self._get_model_layers()
@@ -27,6 +36,8 @@ class ActivationExtractor:
         
         self.activations = {}
         self.hooks = []
+        
+        print(f"   ✅ 提取投影层: {projection_type}")
     
     def _get_model_layers(self):
         """自动检测模型层的正确访问路径"""
@@ -58,12 +69,37 @@ class ActivationExtractor:
         return hook
     
     def register_hooks(self):
-        """注册hooks到所有层的Q投影"""
+        """注册hooks到所有层的指定投影层
+        
+        投影层位置:
+        - q_proj, k_proj, v_proj, o_proj: 在 layer.self_attn 中
+        - up_proj, down_proj, gate_proj: 在 layer.mlp 中
+        """
+        print(f"🔧 注册 {self.projection_type} hooks...")
+        
         for layer_id in range(self.num_layers):
             layer = self.model_layers[layer_id]
-            hook = layer.self_attn.q_proj.register_forward_hook(
-                self._get_activation_hook(layer_id)
-            )
+            
+            # 根据投影类型选择要hook的模块
+            if self.projection_type in ['q_proj', 'k_proj', 'v_proj', 'o_proj']:
+                # 注意力层投影
+                try:
+                    module = getattr(layer.self_attn, self.projection_type)
+                except AttributeError:
+                    raise ValueError(f"模型层没有 self_attn.{self.projection_type} 属性!")
+                    
+            elif self.projection_type in ['up_proj', 'down_proj', 'gate_proj']:
+                # MLP层投影 (gate_proj是某些模型的额外投影)
+                try:
+                    module = getattr(layer.mlp, self.projection_type)
+                except AttributeError:
+                    raise ValueError(f"模型层没有 mlp.{self.projection_type} 属性!")
+            else:
+                raise ValueError(f"不支持的投影类型: {self.projection_type}. "
+                               f"支持的类型: q_proj, k_proj, v_proj, o_proj, up_proj, down_proj, gate_proj")
+            
+            # 注册hook
+            hook = module.register_forward_hook(self._get_activation_hook(layer_id))
             self.hooks.append(hook)
     
     def remove_hooks(self):
@@ -94,8 +130,8 @@ class ActivationExtractor:
         """提取数据样本的激活值
         
         Args:
-            data_samples: 数据样本列表,每个样本包含 prompt 和 response
-            max_samples: 最大样本数量限制
+            data_samples: 数据样本列表
+            max_samples: 最大样本数
             
         Returns:
             dict: {layer_id: numpy_array} 每层的激活值
@@ -106,43 +142,31 @@ class ActivationExtractor:
         if max_samples:
             data_samples = data_samples[:max_samples]
         
-        print(f"📥 提取 {len(data_samples)} 个样本的激活值...")
+        print(f"   提取 {len(data_samples)} 个样本的激活值...")
         self.model.eval()
         
         with torch.no_grad():
-            for sample in tqdm(data_samples, desc="提取激活"):
+            for sample in tqdm(data_samples, desc=f"   提取 {self.projection_type}"):
                 text = self.format_conversation(sample['prompt'], sample['response'])
                 inputs = self.tokenizer(
                     text,
                     return_tensors='pt',
                     truncation=True,
-                    max_length=512
+                    max_length=2048
                 ).to(self.device)
-                self.model(**inputs)
+                
+                # 前向传播
+                _ = self.model(**inputs)
         
+        # 移除hooks并返回结果
         self.remove_hooks()
         
-        # 整理激活值为numpy数组,并按注意力头分割
-        head_activations = {}
+        # 转换为numpy数组
+        activations_np = {}
+        for key, values in self.activations.items():
+            activations_np[key] = torch.cat(values, dim=0).numpy()
         
-        for layer_id in range(self.num_layers):
-            layer_key = f"layer-{layer_id}"
-            if layer_key in self.activations:
-                # 合并该层所有样本的激活值
-                layer_acts = torch.cat(self.activations[layer_key], dim=0).numpy()
-                
-                # 计算每个头的维度
-                num_heads = self.model.config.num_attention_heads
-                head_dim = self.model.config.hidden_size // num_heads
-                
-                # 按头分割激活值
-                for head_id in range(num_heads):
-                    start_idx = head_id * head_dim
-                    end_idx = (head_id + 1) * head_dim
-                    head_key = f"layer-{layer_id}-head-{head_id}"
-                    head_activations[head_key] = layer_acts[:, start_idx:end_idx]
-        
-        return head_activations
+        return activations_np
 
 
 def load_preference_data(data_dir: str, dimension: str) -> Tuple[List, List]:
@@ -186,6 +210,7 @@ def extract_and_save_features(
     model_name: str,
     data_dir: str,
     dimension: str,
+    projection_type: str,  # 新增: 投影层类型
     output_dir: str,
     max_samples: int = None,
     device: str = 'cuda:0'
@@ -196,12 +221,13 @@ def extract_and_save_features(
         model_name: 模型名称或路径
         data_dir: 数据目录
         dimension: 偏好维度
+        projection_type: 投影层类型 (q_proj/k_proj/v_proj/o_proj/up_proj/down_proj)
         output_dir: 输出目录
         max_samples: 最大样本数
         device: 设备
     """
     print("=" * 80)
-    print(f"🚀 开始提取 {dimension} 维度的特征")
+    print(f"🚀 开始提取 {dimension} 维度 - {projection_type} 投影层的特征")
     print("=" * 80)
     
     # 1. 加载模型
@@ -223,17 +249,17 @@ def extract_and_save_features(
         rejected_samples = rejected_samples[:max_samples]
         print(f"\n⚠️  限制样本数: {max_samples}")
     
-    # 3. 提取激活值
-    extractor = ActivationExtractor(model, tokenizer, device)
+    # 3. 提取激活值 (使用指定的投影层)
+    extractor = ActivationExtractor(model, tokenizer, projection_type, device)
     
-    print(f"\n📊 提取 Chosen 样本激活值:")
+    print(f"\n📊 提取 Chosen 样本激活值 ({projection_type}):")
     h_chosen = extractor.extract_activations(chosen_samples, max_samples)
     
-    print(f"\n📊 提取 Rejected 样本激活值:")
+    print(f"\n📊 提取 Rejected 样本激活值 ({projection_type}):")
     h_rejected = extractor.extract_activations(rejected_samples, max_samples)
     
     # 4. 计算特征差分并按层保存
-    print(f"\n💾 计算并保存特征差分...")
+    print(f"\n💾 计算并保存 {projection_type} 的特征差分...")
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
@@ -241,67 +267,58 @@ def extract_and_save_features(
     layer_diffs = {}
     
     num_layers = model.config.num_hidden_layers
-    num_heads = model.config.num_attention_heads
     
     for layer_id in range(num_layers):
-        # 合并该层所有头的激活值
-        layer_chosen = []
-        layer_rejected = []
+        layer_key = f"layer-{layer_id}"
         
-        for head_id in range(num_heads):
-            head_key = f"layer-{layer_id}-head-{head_id}"
-            if head_key in h_chosen and head_key in h_rejected:
-                layer_chosen.append(h_chosen[head_key])
-                layer_rejected.append(h_rejected[head_key])
+        if layer_key not in h_chosen or layer_key not in h_rejected:
+            print(f"   ⚠️  跳过 {layer_key}: 缺少激活值")
+            continue
         
-        if layer_chosen:
-            # 拼接所有头 (N, hidden_size)
-            layer_chosen = np.concatenate(layer_chosen, axis=1)
-            layer_rejected = np.concatenate(layer_rejected, axis=1)
-            
-            # 计算差分
-            diff = layer_chosen - layer_rejected
-            layer_diffs[layer_id] = diff
-            
-            print(f"   Layer {layer_id:2d}: diff shape = {diff.shape}")
+        # 计算特征差分: Δh = h_chosen - h_rejected
+        diff = h_chosen[layer_key] - h_rejected[layer_key]
+        layer_diffs[layer_id] = diff
+        
+        print(f"   ✅ Layer {layer_id:2d} | Shape: {diff.shape} | "
+              f"Mean: {diff.mean():.4f} | Std: {diff.std():.4f}")
     
-    # 5. 保存
-    output_file = output_dir / f'{dimension}_feature_diff.npz'
-    np.savez(
+    # 5. 保存到文件 (文件名包含投影层类型)
+    output_file = output_dir / f'{dimension}_{projection_type}_feature_diff.npz'
+    np.savez_compressed(
         output_file,
-        **{f'layer_{i}': diff for i, diff in layer_diffs.items()},
+        **{f'layer_{layer_id}': diff for layer_id, diff in layer_diffs.items()},
         num_layers=num_layers,
         num_samples=len(chosen_samples),
-        hidden_size=model.config.hidden_size
+        hidden_size=list(layer_diffs.values())[0].shape[1] if layer_diffs else 0
     )
     
-    print(f"\n✅ 特征差分已保存: {output_file}")
-    print(f"   包含 {len(layer_diffs)} 层的特征差分")
-    
-    # 清理
-    del model
-    torch.cuda.empty_cache()
-    
-    return output_file
+    print(f"\n✅ 特征差分已保存到: {output_file}")
+    print(f"   - 投影层: {projection_type}")
+    print(f"   - 层数: {len(layer_diffs)}")
+    print(f"   - 样本数: {len(chosen_samples)}")
+    print(f"   - 输出维度: {list(layer_diffs.values())[0].shape[1] if layer_diffs else 'N/A'}")
+    print("=" * 80)
 
 
 if __name__ == '__main__':
     import argparse
     
-    parser = argparse.ArgumentParser(description='提取偏好特征差分')
+    parser = argparse.ArgumentParser(description='提取偏好特征差分 (支持指定投影层)')
     parser.add_argument('--model_name', type=str, required=True,
-                        help='模型名称或路径')
+                       help='模型名称或路径')
     parser.add_argument('--data_dir', type=str, required=True,
-                        help='数据目录路径')
+                       help='数据目录 (包含 {dimension}_chosen.jsonl 和 {dimension}_rejected.jsonl)')
     parser.add_argument('--dimension', type=str, required=True,
-                        choices=['safety', 'helpfulness', 'correctness', 'coherence'],
-                        help='偏好维度')
+                       help='偏好维度 (safety/helpfulness/correctness/coherence)')
+    parser.add_argument('--projection', type=str, required=True,
+                       choices=['q_proj', 'k_proj', 'v_proj', 'o_proj', 'up_proj', 'down_proj', 'gate_proj'],
+                       help='投影层类型 (q/k/v/o在self_attn, up/down/gate在mlp)')
     parser.add_argument('--output_dir', type=str, required=True,
-                        help='输出目录')
+                       help='输出目录')
     parser.add_argument('--max_samples', type=int, default=None,
-                        help='最大样本数(用于测试)')
+                       help='最大样本数 (默认使用全部)')
     parser.add_argument('--device', type=str, default='cuda:0',
-                        help='设备')
+                       help='设备 (cuda:0, cuda:1, etc.)')
     
     args = parser.parse_args()
     
@@ -309,6 +326,7 @@ if __name__ == '__main__':
         model_name=args.model_name,
         data_dir=args.data_dir,
         dimension=args.dimension,
+        projection_type=args.projection,
         output_dir=args.output_dir,
         max_samples=args.max_samples,
         device=args.device
